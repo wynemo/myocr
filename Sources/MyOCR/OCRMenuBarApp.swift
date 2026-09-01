@@ -136,6 +136,7 @@ final class OCRMenuBarApp: NSObject, NSApplicationDelegate {
         guard !isBusy else { return }
 
         guard screenshotService.requestPermissionIfNeeded() else {
+            playFailureSound()
             showScreenRecordingPermissionAlert()
             return
         }
@@ -156,20 +157,31 @@ final class OCRMenuBarApp: NSObject, NSApplicationDelegate {
             let text = TextPostProcessor.clean(rawText)
 
             guard !text.isEmpty else {
+                playFailureSound()
                 toastWindow.show("没有识别到文字", style: .warning)
                 return
             }
 
             clipboardService.copy(text)
+            playSuccessSound()
             toastWindow.show("文字已复制到剪贴板", style: .success)
         } catch {
             if let screenshotError = error as? SystemScreenshotError,
                screenshotError == .cancelled {
                 return
             } else {
+                playFailureSound()
                 showError(title: "识别失败", message: error.localizedDescription)
             }
         }
+    }
+
+    private func playSuccessSound() {
+        NSSound(named: NSSound.Name("Glass"))?.play()
+    }
+
+    private func playFailureSound() {
+        NSSound(named: NSSound.Name("Basso"))?.play()
     }
 
     private func showScreenRecordingPermissionAlert() {
