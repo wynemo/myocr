@@ -25,6 +25,6 @@
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSScreenCaptureUsageDescription</key>
-	<string>MyOCR 需要读取你框选的屏幕区域以识别文字。</string>
+	<string>MyOCR 需要屏幕录制权限完成截图识别；框选界面使用 macOS 原生截图工具。</string>
 </dict>
 </plist>

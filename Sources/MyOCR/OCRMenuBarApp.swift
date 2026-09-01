@@ -4,8 +4,7 @@ import Carbon.HIToolbox
 @MainActor
 final class OCRMenuBarApp: NSObject, NSApplicationDelegate {
     private let hotKeyManager = HotkeyManager()
-    private let selectionController = SelectionOverlayController()
-    private let captureService = ScreenCaptureService()
+    private let screenshotService = SystemScreenshotService()
     private let ocrService = OCRService()
     private let clipboardService = ClipboardService()
     private let toastWindow = ToastWindow()
@@ -65,14 +64,17 @@ final class OCRMenuBarApp: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             button.title = "OCR"
-            button.image = NSImage(
+            let icon = NSImage(
                 systemSymbolName: "text.viewfinder",
                 accessibilityDescription: "MyOCR"
             )
+            icon?.size = NSSize(width: 17, height: 17)
+            icon?.isTemplate = true
+            button.image = icon
             button.imagePosition = .imageLeft
-            button.imageScaling = .scaleProportionallyUpOrDown
+            button.imageScaling = .scaleProportionallyDown
             button.font = NSFont.systemFont(ofSize: 12, weight: .medium)
-            button.toolTip = "MyOCR · ⌘⇧O 识别屏幕文字"
+            button.toolTip = "MyOCR · ⌘⇧O 使用系统截图识别文字"
         }
 
         let menu = NSMenu()
@@ -133,61 +135,47 @@ final class OCRMenuBarApp: NSObject, NSApplicationDelegate {
     private func startOCRSelection() {
         guard !isBusy else { return }
 
-        guard captureService.requestPermissionIfNeeded() else {
+        guard screenshotService.requestPermissionIfNeeded() else {
             showScreenRecordingPermissionAlert()
             return
         }
 
         isBusy = true
-        selectionController.begin(
-            onSelection: { [weak self] selection in
-                guard let self else { return }
-                Task { @MainActor in
-                    await self.process(selection)
-                }
-            },
-            onCancel: { [weak self] in
-                self?.isBusy = false
-            }
-        )
+        Task { @MainActor in
+            await self.processScreenshot()
+        }
     }
 
-    private func process(_ selection: SelectionOverlayController.Selection) async {
-        selectionController.dismiss()
+    private func processScreenshot() async {
+        defer { isBusy = false }
 
         do {
-            // Give AppKit one run-loop turn to remove the overlay from the captured frame.
-            try await Task.sleep(nanoseconds: 100_000_000)
-
-            let image = try await captureService.capture(selection)
+            let image = try await screenshotService.captureSelectedImage()
             let languageID = SettingsStore.shared.languageIdentifier
             let rawText = try await ocrService.recognize(image, languageID: languageID)
             let text = TextPostProcessor.clean(rawText)
 
             guard !text.isEmpty else {
                 toastWindow.show("没有识别到文字", style: .warning)
-                isBusy = false
                 return
             }
 
             clipboardService.copy(text)
             toastWindow.show("文字已复制到剪贴板", style: .success)
         } catch {
-            if let captureError = error as? ScreenCaptureError,
-               captureError == .permissionDenied {
-                showScreenRecordingPermissionAlert()
+            if let screenshotError = error as? SystemScreenshotError,
+               screenshotError == .cancelled {
+                return
             } else {
                 showError(title: "识别失败", message: error.localizedDescription)
             }
         }
-
-        isBusy = false
     }
 
     private func showScreenRecordingPermissionAlert() {
         let alert = NSAlert()
         alert.messageText = "需要屏幕录制权限"
-        alert.informativeText = "MyOCR 需要读取你框选的屏幕区域。请在“系统设置 → 隐私与安全性 → 屏幕录制”中允许 MyOCR，然后重新按 ⌘⇧O。"
+        alert.informativeText = "MyOCR 需要屏幕录制权限才能完成截图识别。请在“系统设置 → 隐私与安全性 → 屏幕录制”中允许 MyOCR，然后重新按 ⌘⇧O。框选界面仍使用 macOS 原生截图工具。"
         alert.addButton(withTitle: "打开系统设置")
         alert.addButton(withTitle: "稍后处理")
 
