@@ -51,11 +51,14 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Build x64
         run: cargo build --release --locked
-      - name: Package signed test MSIX
+      - name: Package portable app
         run: ./packaging/build.ps1
       - uses: actions/upload-artifact@v4
         with:
-          name: MyOCR-Windows-x64
-          path: windows/dist/*
+          name: MyOCR-Windows-portable-x64
+          path: |
+            windows/dist/portable/myocr.exe
+            windows/dist/portable/README.md
+            windows/dist/portable/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30

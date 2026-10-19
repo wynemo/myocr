@@ -2,19 +2,15 @@
 
 Rust 编写的 Windows 11 x64 托盘 OCR 工具，使用系统 Windows.Media.Ocr，离线识别，无需 API Key。macOS 版保留原来的 Swift 实现。
 
-## 下载与安装
+## 下载与运行
 
-1. 打开 https://github.com/wynemo/myocr/actions/workflows/windows.yml ，选择绿色成功的构建，在页面底部 Artifacts 下载 **MyOCR-Windows-x64**（下载需要登录 GitHub）。
-2. 解压到一个目录，在该目录用普通用户 PowerShell 执行：
+1. 打开 https://github.com/wynemo/myocr/actions/workflows/windows.yml ，选择成功的构建，在页面底部 Artifacts 下载 **MyOCR-Windows-portable-x64**（下载需要登录 GitHub）。
+2. 将 ZIP 解压到一个目录，双击 **myocr.exe**。
+3. 程序常驻托盘，按 **Ctrl+Alt+O** 框选文字。托盘图标可能收在右下角的隐藏图标区域。
 
-   ```powershell
-   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1
-   ```
+这是未签名的便携版，无需安装、导入证书或管理员权限。Windows 可能显示 SmartScreen 未识别应用提示，是否允许运行受本机安全策略控制。程序静态链接 C 运行库，无需另装 Rust 或 Visual C++ 运行库。
 
-3. 首次安装需要接受一次管理员 UAC 提示，用于将该测试构建的公开签名证书导入“本地计算机 → 受信任人”。安装脚本随后在原来的普通用户会话安装 MSIX。不要用管理员身份启动整个脚本。只信任来自本仓库的产物；公司策略可能禁止侧载或证书导入。
-4. 从开始菜单打开 **MyOCR**。托盘图标可能收在右下角的隐藏图标区域。
-
-这是自签名测试包，尚未上架 Microsoft Store。每次 CI 重新生成证书，更新时可能再次要求证书信任。CI 不分发私钥。安装脚本会结束已有 MyOCR 进程以便更新。安装后启动、截图和 OCR 均不需要管理员权限。程序静态链接 C 运行库，无需另装 Rust 或 Visual C++ 运行库。
+更新时先通过托盘菜单退出 MyOCR，再用新版文件替换旧文件。首次使用请确认系统已安装对应的 OCR 语言包。
 
 ## 使用
 
@@ -27,18 +23,20 @@ Rust 编写的 Windows 11 x64 托盘 OCR 工具，使用系统 Windows.Media.Ocr
 - 单次选区尺寸受系统 `OcrEngine.MaxImageDimension` 限制，超限时提示缩小区域。
 - 快捷键被其他程序占用时会提示并退出。暂不提供自定义快捷键、开机自启、ARM64 原生包或复杂表格重建。
 
-## 卸载
+## 删除与旧版迁移
 
-在 Windows 设置的“已安装的应用”卸载 MyOCR，或普通用户 PowerShell 执行：
+便携版退出后直接删除解压目录即可。
+
+如果之前安装过 MSIX 测试版，先从托盘退出旧版，并在 Windows 设置的“已安装的应用”中卸载 MyOCR，避免两个版本同时运行。也可以在普通用户 PowerShell 执行：
 
 ```powershell
 Get-AppxPackage Wynemo.MyOCR | Remove-AppxPackage
 ```
 
-测试证书不会随应用卸载自动移除。可打开 `certlm.msc`（需要管理员权限），在“受信任人 → 证书”中对照下载包 `MyOCR-Test.cer` 的指纹移除该构建的证书。不要仅凭同名删除其他证书。
+旧版导入的测试证书可由管理员在 `certlm.msc` 的“受信任人 → 证书”中，按照旧下载包 `MyOCR-Test.cer` 的指纹移除。便携版不使用该证书。
 
 ## 构建
 
-通过 GitHub Actions 的 **Windows → Run workflow** 编译、运行几何逻辑单元测试、Clippy 检查，并生成签名 MSIX、公开测试证书、安装脚本、说明和 SHA-256 校验清单。编译和 Windows SDK 打包全部在 GitHub 的 Windows runner 上完成，macOS 本地无需安装 Windows 工具链。
+通过 GitHub Actions 的 **Windows → Run workflow** 编译、运行几何逻辑单元测试和 Clippy 检查，生成便携版 ZIP。产物内只有 `myocr.exe`、本说明和 `SHA256SUMS.txt` 校验清单。Windows 编译全部在 GitHub 的 Windows runner 上完成，macOS 本地无需安装 Windows 工具链。
 
-CI 的编译与单元测试不能替代真实 Windows 11 桌面上的框选、OCR 语言包、通知和多屏缩放验收。请在目标 Windows 机器测试这些交互。
+程序直接从普通 Win32 进程调用系统 Windows.Media.Ocr，不注册应用包身份。CI 的编译与单元测试不能替代真实 Windows 11 桌面上的框选、OCR 语言包、通知和多屏缩放验收。请在目标 Windows 机器测试这些交互。
