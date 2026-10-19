@@ -54,3 +54,9 @@ Sources/MyOCR/
 ```
 
 应用使用 Apple Vision，识别过程离线完成，不会上传截图或识别文本。
+
+## Windows 11 版（Rust）
+
+Windows 版位于 [`windows/`](windows/README.md)，使用系统 Windows OCR，支持 `Ctrl+Alt+O` 框选、托盘菜单和自动复制。
+
+在 [GitHub Actions](https://github.com/wynemo/myocr/actions/workflows/windows.yml) 下载成功构建的 **MyOCR-Windows-x64** 测试包。编译、检查和 MSIX 打包在 GitHub Windows runner 完成，本机不需要安装 Windows 编译工具链。安装方式和测试证书说明见 [Windows 使用说明](windows/README.md)。
