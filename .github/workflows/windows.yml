@@ -12,6 +12,22 @@ permissions:
   contents: read
 
 jobs:
+  api-check:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: windows
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust Windows target for type checking
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy --target x86_64-pc-windows-gnu
+          rustup default stable
+      - name: Format
+        run: cargo fmt --check
+      - name: Check Windows API calls without linking
+        run: cargo clippy --locked --all-targets --target x86_64-pc-windows-gnu -- -D warnings
+
   build:
     runs-on: windows-2022
     defaults:
