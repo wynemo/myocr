@@ -226,12 +226,18 @@ unsafe fn copy_text(hwnd: HWND, text: &str) -> Result<(), String> {
     }
 }
 
-unsafe fn cancel(state: &mut App) {
-    state.dragging = false;
+unsafe fn cancel(pointer: *mut App) {
+    // ReleaseCapture/ShowWindow can synchronously re-enter the window procedure.
+    // Finish state changes and end the borrow before calling either API.
+    let overlay = {
+        let state = &mut *pointer;
+        state.dragging = false;
+        state.screenshot = None;
+        state.start = None;
+        state.overlay
+    };
     ReleaseCapture();
-    ShowWindow(state.overlay, SW_HIDE);
-    state.screenshot = None;
-    state.start = None;
+    ShowWindow(overlay, SW_HIDE);
 }
 
 unsafe fn begin(hwnd: HWND) {
@@ -245,18 +251,11 @@ unsafe fn begin(hwnd: HWND) {
             state.screenshot = Some(shot);
             state.start = None;
             state.dragging = false;
-            SetWindowPos(
-                state.overlay,
-                HWND_TOPMOST,
-                x,
-                y,
-                width,
-                height,
-                SWP_SHOWWINDOW,
-            );
-            SetForegroundWindow(state.overlay);
-            SetFocus(state.overlay);
-            InvalidateRect(state.overlay, null(), 0);
+            let overlay = state.overlay;
+            SetWindowPos(overlay, HWND_TOPMOST, x, y, width, height, SWP_SHOWWINDOW);
+            SetForegroundWindow(overlay);
+            SetFocus(overlay);
+            InvalidateRect(overlay, null(), 0);
         }
         Err(error) => notify(hwnd, &error, true),
     }
@@ -328,9 +327,9 @@ unsafe fn menu(hwnd: HWND) {
         QUIT => {
             DestroyWindow(hwnd);
         }
-        AUTO => state.selected = None,
-        id if id >= LANGUAGE && (id - LANGUAGE) < state.languages.len() as u16 => {
-            state.selected = Some((id - LANGUAGE) as usize);
+        AUTO => (*app_ptr(hwnd)).selected = None,
+        id if id >= LANGUAGE && (id - LANGUAGE) < (*app_ptr(hwnd)).languages.len() as u16 => {
+            (*app_ptr(hwnd)).selected = Some((id - LANGUAGE) as usize);
         }
         _ => {}
     }
@@ -395,8 +394,9 @@ unsafe extern "system" fn overlay_proc(
                 (rect.right - rect.left >= 3 && rect.bottom - rect.top >= 3)
                     .then(|| shot.crop(rect))
             });
-            cancel(state);
+            cancel(pointer);
             if let Some(crop) = crop {
+                let state = &mut *pointer;
                 let owner = GetWindow(hwnd, GW_OWNER);
                 match crop {
                     Ok((pixels, width, height)) => {
@@ -424,21 +424,21 @@ unsafe extern "system" fn overlay_proc(
             0
         }
         WM_KEYDOWN if wparam == VK_ESCAPE as usize => {
-            cancel(state);
+            cancel(pointer);
             0
         }
         WM_RBUTTONDOWN | WM_CLOSE => {
-            cancel(state);
+            cancel(pointer);
             0
         }
         WM_ACTIVATE if (wparam & 0xffff) == WA_INACTIVE as usize => {
             if state.screenshot.is_some() {
-                cancel(state);
+                cancel(pointer);
             }
             0
         }
         WM_CAPTURECHANGED if state.dragging => {
-            cancel(state);
+            cancel(pointer);
             0
         }
         _ => DefWindowProcW(hwnd, message, wparam, lparam),
