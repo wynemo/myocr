@@ -22,6 +22,7 @@ const TRAY: u32 = WM_APP + 1;
 const COMPLETE: u32 = WM_APP + 2;
 const CAPTURE: u16 = 1;
 const QUIT: u16 = 2;
+const CHINESE_SETUP: u16 = 3;
 const AUTO: u16 = 100;
 const LANGUAGE: u16 = 101;
 
@@ -306,6 +307,12 @@ unsafe fn menu(hwnd: HWND) {
         languages as usize,
         wide("OCR language").as_ptr(),
     );
+    AppendMenuW(
+        menu,
+        MF_STRING,
+        CHINESE_SETUP as usize,
+        wide("Chinese OCR setup...").as_ptr(),
+    );
     AppendMenuW(menu, MF_SEPARATOR, 0, null());
     AppendMenuW(menu, MF_STRING, QUIT as usize, wide("Quit MyOCR").as_ptr());
     let mut point = zeroed();
@@ -327,6 +334,8 @@ unsafe fn menu(hwnd: HWND) {
         QUIT => {
             DestroyWindow(hwnd);
         }
+        CHINESE_SETUP => dialog(hwnd,
+            "中文识别：在 OCR language 菜单选择中文（zh-Hans / zh-Hant）。\n\n如果没有中文，请在管理员 PowerShell 中安装系统简体中文 OCR 组件：\n\nAdd-WindowsCapability -Online -Name Language.OCR~~~zh-CN~0.0.1.0\n\n安装完成后退出并重启 MyOCR。中文输入法不等于中文 OCR 组件。\n\nChinese OCR requires an installed Windows OCR language pack."),
         AUTO => (*app_ptr(hwnd)).selected = None,
         id if id >= LANGUAGE && (id - LANGUAGE) < (*app_ptr(hwnd)).languages.len() as u16 => {
             (*app_ptr(hwnd)).selected = Some((id - LANGUAGE) as usize);
@@ -522,6 +531,13 @@ unsafe fn run_app() -> Result<(), String> {
     if languages.is_empty() {
         return Err("No Windows OCR languages installed. Open Settings > Time & language > Language & region > Language options and install an OCR-capable language (for example English or Chinese), then restart MyOCR.".into());
     }
+    // The profile API selects one language, which may be English even when
+    // Chinese OCR is available. Prefer an installed Chinese engine on startup.
+    let selected = languages.iter().position(|(tag, _)| {
+        tag.split('-')
+            .next()
+            .is_some_and(|base| base.eq_ignore_ascii_case("zh"))
+    });
     let (sender, receiver) = mpsc::channel();
     let mut state = Box::new(App {
         overlay: null_mut(),
@@ -531,7 +547,7 @@ unsafe fn run_app() -> Result<(), String> {
         dragging: false,
         busy: false,
         languages,
-        selected: None,
+        selected,
         sender,
         receiver,
     });
@@ -610,7 +626,11 @@ unsafe fn run_app() -> Result<(), String> {
         DestroyWindow(owner);
         return Err("Cannot add the system tray icon.".into());
     }
-    notify(owner, "Ready. Press Ctrl+Alt+O to select text. Right-click the tray icon to choose an OCR language.", false);
+    let language = state
+        .selected
+        .map(|i| state.languages[i].0.as_str())
+        .unwrap_or("Windows profile; Chinese OCR not available");
+    notify(owner, &format!("Ready. OCR: {language}. Press Ctrl+Alt+O. Right-click the tray icon for OCR language / Chinese OCR setup."), false);
     let mut message = zeroed();
     loop {
         let status = GetMessageW(&mut message, null_mut(), 0, 0);
