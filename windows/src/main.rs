@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod ocr;
+mod oneocr;
 
 use std::{
     ffi::c_void,
@@ -23,6 +24,9 @@ const COMPLETE: u32 = WM_APP + 2;
 const CAPTURE: u16 = 1;
 const QUIT: u16 = 2;
 const CHINESE_SETUP: u16 = 3;
+const ENGINE_AUTO: u16 = 4;
+const ENGINE_LEGACY: u16 = 5;
+const ENGINE_DETAILS: u16 = 6;
 const AUTO: u16 = 100;
 const LANGUAGE: u16 = 101;
 
@@ -150,8 +154,11 @@ struct App {
     busy: bool,
     languages: Vec<(String, String)>,
     selected: Option<usize>,
-    sender: mpsc::Sender<Result<String, String>>,
-    receiver: mpsc::Receiver<Result<String, String>>,
+    prefer_oneocr: bool,
+    engine_status: String,
+    last_result: String,
+    sender: mpsc::Sender<ocr::Request>,
+    receiver: mpsc::Receiver<ocr::Event>,
 }
 
 unsafe fn app_ptr(hwnd: HWND) -> *mut App {
@@ -276,6 +283,31 @@ unsafe fn menu(hwnd: HWND) {
         })
         .as_ptr(),
     );
+    let engines = CreatePopupMenu();
+    AppendMenuW(
+        engines,
+        MF_STRING | if state.prefer_oneocr { MF_CHECKED } else { 0 },
+        ENGINE_AUTO as usize,
+        wide("Automatic (prefer OneOCR)").as_ptr(),
+    );
+    AppendMenuW(
+        engines,
+        MF_STRING | if !state.prefer_oneocr { MF_CHECKED } else { 0 },
+        ENGINE_LEGACY as usize,
+        wide("Windows OCR (legacy)").as_ptr(),
+    );
+    AppendMenuW(
+        menu,
+        MF_POPUP,
+        engines as usize,
+        wide("OCR engine").as_ptr(),
+    );
+    AppendMenuW(
+        menu,
+        MF_STRING,
+        ENGINE_DETAILS as usize,
+        wide("Engine status...").as_ptr(),
+    );
     let languages = CreatePopupMenu();
     AppendMenuW(
         languages,
@@ -305,7 +337,7 @@ unsafe fn menu(hwnd: HWND) {
         menu,
         MF_POPUP,
         languages as usize,
-        wide("OCR language").as_ptr(),
+        wide("Windows OCR language (fallback)").as_ptr(),
     );
     AppendMenuW(
         menu,
@@ -334,8 +366,17 @@ unsafe fn menu(hwnd: HWND) {
         QUIT => {
             DestroyWindow(hwnd);
         }
+        ENGINE_AUTO => (*app_ptr(hwnd)).prefer_oneocr = true,
+        ENGINE_LEGACY => (*app_ptr(hwnd)).prefer_oneocr = false,
+        ENGINE_DETAILS => {
+            let app = &*app_ptr(hwnd);
+            let text = format!("Mode: {}\n\n{}\n\nLast result: {}",
+                if app.prefer_oneocr { "Automatic (prefer OneOCR)" } else { "Windows OCR (legacy)" },
+                app.engine_status, app.last_result);
+            dialog(hwnd, &text);
+        }
         CHINESE_SETUP => dialog(hwnd,
-            "中文识别：在 OCR language 菜单选择中文（zh-Hans / zh-Hant）。\n\n如果没有中文，请在管理员 PowerShell 中安装系统简体中文 OCR 组件：\n\nAdd-WindowsCapability -Online -Name Language.OCR~~~zh-CN~0.0.1.0\n\n安装完成后退出并重启 MyOCR。中文输入法不等于中文 OCR 组件。\n\nChinese OCR requires an installed Windows OCR language pack."),
+            "OneOCR 自动识别语言，无需选择旧版中文模型。\n使用 Windows OCR 回退引擎时，请在 Windows OCR language 菜单选择中文（zh-Hans / zh-Hant）。\n\n如果没有中文，请在管理员 PowerShell 中安装系统简体中文 OCR 组件：\n\nAdd-WindowsCapability -Online -Name Language.OCR~~~zh-CN~0.0.1.0\n\n安装完成后退出并重启 MyOCR。中文输入法不等于中文 OCR 组件。\n\nChinese OCR requires an installed Windows OCR language pack."),
         AUTO => (*app_ptr(hwnd)).selected = None,
         id if id >= LANGUAGE && (id - LANGUAGE) < (*app_ptr(hwnd)).languages.len() as u16 => {
             (*app_ptr(hwnd)).selected = Some((id - LANGUAGE) as usize);
@@ -410,22 +451,17 @@ unsafe extern "system" fn overlay_proc(
                 match crop {
                     Ok((pixels, width, height)) => {
                         state.busy = true;
-                        let tag = state.selected.map(|i| state.languages[i].0.clone());
-                        let sender = state.sender.clone();
-                        let owner_id = owner as usize;
-                        std::thread::spawn(move || {
-                            let status = CoInitializeEx(null(), COINIT_MULTITHREADED as u32);
-                            let result = if status < 0 {
-                                Err(format!("Cannot initialize OCR (0x{:08X}).", status as u32))
-                            } else {
-                                let result = ocr::recognize(&pixels, width, height, tag.as_deref())
-                                    .map_err(|e| format!("OCR failed: {e}\nCheck installed Windows OCR language packs."));
-                                CoUninitialize();
-                                result
-                            };
-                            let _ = sender.send(result);
-                            PostMessageW(owner_id as HWND, COMPLETE, 0, 0);
-                        });
+                        let request = ocr::Request {
+                            pixels,
+                            width,
+                            height,
+                            language: state.selected.map(|i| state.languages[i].0.clone()),
+                            prefer_oneocr: state.prefer_oneocr,
+                        };
+                        if state.sender.send(request).is_err() {
+                            state.busy = false;
+                            notify(owner, "OCR worker stopped. Restart MyOCR.", true);
+                        }
                     }
                     Err(error) => notify(owner, &error, true),
                 }
@@ -476,22 +512,62 @@ unsafe extern "system" fn owner_proc(
         }
         COMPLETE => {
             let state = &mut *app_ptr(hwnd);
-            state.busy = false;
-            if let Ok(result) = state.receiver.try_recv() {
-                match result {
-                    Ok(text) if text.is_empty() => {
-                        notify(hwnd, "No text found. Clipboard unchanged.", false)
+            let events: Vec<_> = state.receiver.try_iter().collect();
+            // End the App borrow before notifications/dialogs can re-enter the UI.
+            for event in events {
+                match event {
+                    ocr::Event::Ready(status) => {
+                        (*app_ptr(hwnd)).engine_status = status.clone();
+                        notify(hwnd, &status, false);
                     }
-                    Ok(text) => match copy_text(hwnd, &text) {
-                        Ok(()) => {
-                            MessageBeep(MB_OK);
-                            notify(hwnd, "Text copied to clipboard.", false);
+                    ocr::Event::Completed(result) => {
+                        (*app_ptr(hwnd)).busy = false;
+                        match result {
+                            Ok(result) => {
+                                let details = match &result.fallback_reason {
+                                    Some(reason) => {
+                                        format!("{} (fallback). OneOCR: {reason}", result.engine)
+                                    }
+                                    None => result.engine.to_string(),
+                                };
+                                (*app_ptr(hwnd)).last_result = details;
+                                if result.text.is_empty() {
+                                    notify(
+                                        hwnd,
+                                        &format!(
+                                            "No text found ({}). Clipboard unchanged.",
+                                            result.engine
+                                        ),
+                                        false,
+                                    );
+                                } else {
+                                    match copy_text(hwnd, &result.text) {
+                                        Ok(()) => {
+                                            MessageBeep(MB_OK);
+                                            let suffix = if result.fallback_reason.is_some() {
+                                                " fallback"
+                                            } else {
+                                                ""
+                                            };
+                                            notify(
+                                                hwnd,
+                                                &format!(
+                                                    "Text copied ({}{suffix}).",
+                                                    result.engine
+                                                ),
+                                                false,
+                                            );
+                                        }
+                                        Err(error) => notify(hwnd, &error, true),
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                (*app_ptr(hwnd)).last_result = error.clone();
+                                notify(hwnd, &error, true);
+                                dialog(hwnd, &error);
+                            }
                         }
-                        Err(error) => notify(hwnd, &error, true),
-                    },
-                    Err(error) => {
-                        notify(hwnd, &error, true);
-                        dialog(hwnd, &error);
                     }
                 }
             }
@@ -527,10 +603,9 @@ unsafe fn run() -> Result<(), String> {
 }
 
 unsafe fn run_app() -> Result<(), String> {
-    let languages = ocr::languages().map_err(|e| format!("Cannot initialize Windows OCR: {e}"))?;
-    if languages.is_empty() {
-        return Err("No Windows OCR languages installed. Open Settings > Time & language > Language & region > Language options and install an OCR-capable language (for example English or Chinese), then restart MyOCR.".into());
-    }
+    // OneOCR does not depend on the legacy engine's language packs.
+    // A missing legacy API/language must not prevent OneOCR from starting.
+    let languages = ocr::languages().unwrap_or_default();
     // The profile API selects one language, which may be English even when
     // Chinese OCR is available. Prefer an installed Chinese engine on startup.
     let selected = languages.iter().position(|(tag, _)| {
@@ -538,7 +613,8 @@ unsafe fn run_app() -> Result<(), String> {
             .next()
             .is_some_and(|base| base.eq_ignore_ascii_case("zh"))
     });
-    let (sender, receiver) = mpsc::channel();
+    let (sender, requests) = mpsc::channel::<ocr::Request>();
+    let (events, receiver) = mpsc::channel::<ocr::Event>();
     let mut state = Box::new(App {
         overlay: null_mut(),
         screenshot: None,
@@ -548,6 +624,9 @@ unsafe fn run_app() -> Result<(), String> {
         busy: false,
         languages,
         selected,
+        prefer_oneocr: true,
+        engine_status: "Initializing OneOCR...".into(),
+        last_result: "No recognition yet".into(),
         sender,
         receiver,
     });
@@ -626,11 +705,31 @@ unsafe fn run_app() -> Result<(), String> {
         DestroyWindow(owner);
         return Err("Cannot add the system tray icon.".into());
     }
-    let language = state
-        .selected
-        .map(|i| state.languages[i].0.as_str())
-        .unwrap_or("Windows profile; Chinese OCR not available");
-    notify(owner, &format!("Ready. OCR: {language}. Press Ctrl+Alt+O. Right-click the tray icon for OCR language / Chinese OCR setup."), false);
+    let owner_id = owner as usize;
+    std::thread::spawn(move || {
+        let status = CoInitializeEx(null(), COINIT_MULTITHREADED as u32);
+        if status < 0 {
+            let _ = events.send(ocr::Event::Ready(format!(
+                "Cannot initialize OCR worker: 0x{:08X}",
+                status as u32
+            )));
+            PostMessageW(owner_id as HWND, COMPLETE, 0, 0);
+            return;
+        }
+        {
+            let backend = ocr::Backend::new();
+            let _ = events.send(ocr::Event::Ready(backend.status()));
+            PostMessageW(owner_id as HWND, COMPLETE, 0, 0);
+            for request in requests {
+                let _ = events.send(ocr::Event::Completed(backend.recognize(request)));
+                if PostMessageW(owner_id as HWND, COMPLETE, 0, 0) == 0 {
+                    break;
+                }
+            }
+        } // Drop native pipelines on their owning thread, before COM teardown.
+        CoUninitialize();
+    });
+    notify(owner, "Ready. Press Ctrl+Alt+O. Initializing OneOCR in the background; check Engine status in the tray menu.", false);
     let mut message = zeroed();
     loop {
         let status = GetMessageW(&mut message, null_mut(), 0, 0);

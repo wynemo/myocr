@@ -59,6 +59,7 @@ jobs:
           path: |
             windows/dist/portable/myocr.exe
             windows/dist/portable/README.md
+            windows/dist/portable/THIRD_PARTY_NOTICES.md
             windows/dist/portable/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30

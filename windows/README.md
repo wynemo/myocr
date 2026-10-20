@@ -1,6 +1,6 @@
 # MyOCR for Windows
 
-Rust 编写的 Windows 11 x64 托盘 OCR 工具，使用系统 Windows.Media.Ocr，离线识别，无需 API Key。macOS 版保留原来的 Swift 实现。
+Rust 编写的 Windows 11 x64 托盘 OCR 工具，优先使用本机截图工具的 OneOCR，失败时回退 Windows.Media.Ocr；全程离线识别，无需 API Key。macOS 版保留原来的 Swift 实现。
 
 ## 下载与运行
 
@@ -10,22 +10,36 @@ Rust 编写的 Windows 11 x64 托盘 OCR 工具，使用系统 Windows.Media.Ocr
 
 这是未签名的便携版，无需安装、导入证书或管理员权限。Windows 可能显示 SmartScreen 未识别应用提示，是否允许运行受本机安全策略控制。程序静态链接 C 运行库，无需另装 Rust 或 Visual C++ 运行库。
 
-更新时先通过托盘菜单退出 MyOCR，再用新版文件替换旧文件。首次使用请确认系统已安装对应的 OCR 语言包。
+更新时先通过托盘菜单退出 MyOCR，再用新版文件替换旧文件。首次使用建议在 Microsoft Store 安装或更新“截图工具”（Snipping Tool）。旧版回退引擎需要系统对应的 OCR 语言包。
 
 ## 使用
 
 - 按 **Ctrl+Alt+O**，或左键点击托盘图标；拖动鼠标框选，松开后识别并自动复制文字。
 - **Esc**、右键或切换到其他应用取消框选，不改变剪贴板。
-- 右键托盘图标，选择 **OCR language** 或退出。启动时优先选择已安装的中文 OCR 引擎；没有中文时使用 Windows 用户语言配置。它不会自动检测所有语言，可在菜单手动选语言，或选择 **Use Windows profile language** 恢复 Windows 配置。当前语言选择仅在本次运行有效。
+- 右键托盘 → **OCR engine** 默认选择 **Automatic (prefer OneOCR)**。OneOCR 自动识别语言，不使用旧版语言菜单。可切换 **Windows OCR (legacy)** 比较两套引擎。
+- **Engine status...** 显示 OneOCR 是否加载成功、加载目录、最近一次实际使用的引擎及回退原因；复制通知也会标出引擎。
+- **Windows OCR language (fallback)** 仅控制旧版引擎：启动时优先选已安装的中文，没有中文则使用 Windows 用户语言配置。它不会自动识别所有语言，当前选择仅在本次运行有效。
 - 有结果时播放系统提示音并显示通知；无文字时保留原剪贴板。关闭 Windows 通知不影响复制功能。
 - 支持多显示器、负坐标布局和每显示器 DPI 感知。截图是启动框选时的静态画面。受保护内容、UAC 安全桌面等无法正常截取。
-- 需要 Windows 已安装对应的 OCR 语言包。若中文或英语没有出现在菜单，去“设置 → 时间和语言 → 语言和区域 → 语言选项”安装对应语言的 OCR 功能。首次启动若没有任何可用识别语言，会显示提示后退出。
-- 单次选区尺寸受系统 `OcrEngine.MaxImageDimension` 限制，超限时提示缩小区域。
+- OneOCR 使用截图工具自带模型。仅当使用 Windows OCR 回退引擎时，才需要系统对应的 OCR 语言包；没有旧版语言包也可以启动程序并尝试 OneOCR。
+- 使用 Windows OCR 回退引擎时，选区受 `OcrEngine.MaxImageDimension` 限制；OneOCR 单次最多提取 1000 行。
 - 快捷键被其他程序占用时会提示并退出。暂不提供自定义快捷键、开机自启、ARM64 原生包或复杂表格重建。
+
+## OneOCR 加载与诊断
+
+程序会枚举**当前用户**安装的 `Microsoft.ScreenSketch`，尝试在安装目录及其 `SnippingTool` 子目录中加载 `oneocr.dll`、`onnxruntime.dll` 和 `oneocr.onemodel`。无需安装证书、提权、修改系统目录或改变 DLL 全局搜索路径。初始化和模型保留在一个后台线程，重复框选时复用。
+
+如果自动发现失败，可先更新 Microsoft Store 的“截图工具”并重启 MyOCR。也支持将**自己机器上同一版本截图工具**的上述三个文件一起放在 `myocr.exe` 旁的 `oneocr/` 文件夹（或直接放在 EXE 旁）再重启。可用普通 PowerShell 查询截图工具路径：
+
+```powershell
+Get-AppxPackage Microsoft.ScreenSketch | Select-Object -ExpandProperty InstallLocation
+```
+
+本仓库与 CI 产物不附带微软 DLL 或模型，也不会自动联网下载它们。OneOCR 是截图工具的非公开接口，版本变化可能导致加载或调用不兼容；遇到可恢复的加载/识别错误会回退旧版引擎。成功识别为空时保留空结果，不用另一个引擎覆盖。可在 **Engine status...** 查看实际状态及原因，更新截图工具后需重启 MyOCR。
 
 ## 无法识别中文
 
-先右键托盘 → **OCR language**，确认当前勾选的是中文（例如 `zh-Hans` / `zh-Hant`）。Windows 用户配置模式可能选中英语引擎，并不会自动识别其他语言。
+先检查 **Engine status...** 最近一次是否使用 `OneOCR`。如果是回退的 `Windows.Media.Ocr`，请确认 **Windows OCR language (fallback)** 勾选中文（例如 `zh-Hans` / `zh-Hant`）。Windows 用户配置模式可能选中英语引擎，并不会自动识别其他语言。
 
 如果菜单没有中文，说明系统没有提供可用的中文 OCR 模型。安装中文输入法或使用中文界面，并不等于已安装 OCR 组件。可以打开**管理员 PowerShell**安装简体中文 OCR：
 
@@ -51,6 +65,6 @@ Get-AppxPackage Wynemo.MyOCR | Remove-AppxPackage
 
 ## 构建
 
-通过 GitHub Actions 的 **Windows → Run workflow** 编译、运行几何逻辑单元测试和 Clippy 检查，生成便携版 ZIP。产物内只有 `myocr.exe`、本说明和 `SHA256SUMS.txt` 校验清单。Windows 编译全部在 GitHub 的 Windows runner 上完成，macOS 本地无需安装 Windows 工具链。
+通过 GitHub Actions 的 **Windows → Run workflow** 编译、运行截图几何、引擎回退、像素格式、原生资源清理等单元测试和 Clippy 检查，生成便携版 ZIP。产物包含 `myocr.exe`、本说明、`THIRD_PARTY_NOTICES.md` 和 `SHA256SUMS.txt` 校验清单。Windows 编译全部在 GitHub 的 Windows runner 上完成，macOS 本地无需安装 Windows 工具链。
 
-程序直接从普通 Win32 进程调用系统 Windows.Media.Ocr，不注册应用包身份。CI 的编译与单元测试不能替代真实 Windows 11 桌面上的框选、OCR 语言包、通知和多屏缩放验收。请在目标 Windows 机器测试这些交互。
+程序直接从普通 Win32 进程动态加载 OneOCR，并保留系统 Windows.Media.Ocr 回退，不注册应用包身份。CI 的模拟 ABI 测试覆盖文本提取及资源释放，但不代表已验证目标机器上的微软模型。真实 OneOCR 效果、框选、通知和多屏缩放仍需在目标 Windows 11 机器验收。
