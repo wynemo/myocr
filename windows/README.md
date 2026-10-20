@@ -18,6 +18,7 @@ Rust 编写的 Windows 11 x64 托盘 OCR 工具，优先使用本机截图工具
 - **Esc**、右键或切换到其他应用取消框选，不改变剪贴板。
 - 右键托盘 → **OCR engine** 默认选择 **Automatic (prefer OneOCR)**。OneOCR 自动识别语言，不使用旧版语言菜单。可切换 **Windows OCR (legacy)** 比较两套引擎。
 - **Engine status...** 显示 OneOCR 是否加载成功、加载目录、最近一次实际使用的引擎及回退原因；复制通知也会标出引擎。
+- **Open in system browser** 使用 Windows 默认浏览器打开项目 GitHub 页面。
 - **Windows OCR language (fallback)** 仅控制旧版引擎：启动时优先选已安装的中文，没有中文则使用 Windows 用户语言配置。它不会自动识别所有语言，当前选择仅在本次运行有效。
 - 有结果时播放系统提示音并显示通知；无文字时保留原剪贴板。关闭 Windows 通知不影响复制功能。
 - 支持多显示器、负坐标布局和每显示器 DPI 感知。截图是启动框选时的静态画面。受保护内容、UAC 安全桌面等无法正常截取。

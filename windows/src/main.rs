@@ -27,6 +27,7 @@ const CHINESE_SETUP: u16 = 3;
 const ENGINE_AUTO: u16 = 4;
 const ENGINE_LEGACY: u16 = 5;
 const ENGINE_DETAILS: u16 = 6;
+const OPEN_BROWSER: u16 = 7;
 const AUTO: u16 = 100;
 const LANGUAGE: u16 = 101;
 
@@ -41,6 +42,23 @@ unsafe fn dialog(hwnd: HWND, text: &str) {
         wide("MyOCR").as_ptr(),
         MB_OK | MB_ICONINFORMATION,
     );
+}
+
+unsafe fn open_in_system_browser(hwnd: HWND, url: &str) {
+    let result = ShellExecuteW(
+        hwnd,
+        wide("open").as_ptr(),
+        wide(url).as_ptr(),
+        null(),
+        null(),
+        SW_SHOWNORMAL,
+    ) as isize;
+    if result <= 32 {
+        dialog(
+            hwnd,
+            &format!("Cannot open the default browser (Windows shell error {result}).\n\n{url}"),
+        );
+    }
 }
 
 struct Screenshot {
@@ -346,6 +364,12 @@ unsafe fn menu(hwnd: HWND) {
         wide("Chinese OCR setup...").as_ptr(),
     );
     AppendMenuW(menu, MF_SEPARATOR, 0, null());
+    AppendMenuW(
+        menu,
+        MF_STRING,
+        OPEN_BROWSER as usize,
+        wide("Open in system browser").as_ptr(),
+    );
     AppendMenuW(menu, MF_STRING, QUIT as usize, wide("Quit MyOCR").as_ptr());
     let mut point = zeroed();
     GetCursorPos(&mut point);
@@ -366,6 +390,7 @@ unsafe fn menu(hwnd: HWND) {
         QUIT => {
             DestroyWindow(hwnd);
         }
+        OPEN_BROWSER => open_in_system_browser(hwnd, "https://github.com/wynemo/myocr"),
         ENGINE_AUTO => (*app_ptr(hwnd)).prefer_oneocr = true,
         ENGINE_LEGACY => (*app_ptr(hwnd)).prefer_oneocr = false,
         ENGINE_DETAILS => {
