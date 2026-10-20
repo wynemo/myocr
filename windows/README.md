@@ -27,13 +27,15 @@ Rust 编写的 Windows 11 x64 托盘 OCR 工具，优先使用本机截图工具
 
 ## OneOCR 加载与诊断
 
-程序会枚举**当前用户**安装的 `Microsoft.ScreenSketch`，尝试在安装目录及其 `SnippingTool` 子目录中加载 `oneocr.dll`、`onnxruntime.dll` 和 `oneocr.onemodel`。无需安装证书、提权、修改系统目录或改变 DLL 全局搜索路径。初始化和模型保留在一个后台线程，重复框选时复用。
+程序会枚举**当前用户**安装的 `Microsoft.ScreenSketch`，在安装目录及其 `SnippingTool` 子目录中查找 `oneocr.dll`、`onnxruntime.dll` 和 `oneocr.onemodel`。为避免 `WindowsApps` 的 DLL 加载权限限制，首次运行会将本机的三个文件复制到 `%LOCALAPPDATA%\MyOCR\OneOCR\` 下的版本缓存，再从缓存加载。复制只读取原文件内容，不继承其受限权限；无需安装证书、提权、修改系统目录权限或改变 DLL 全局搜索路径。初始化和模型保留在一个后台线程，重复框选时复用。
 
 如果自动发现失败，可先更新 Microsoft Store 的“截图工具”并重启 MyOCR。也支持将**自己机器上同一版本截图工具**的上述三个文件一起放在 `myocr.exe` 旁的 `oneocr/` 文件夹（或直接放在 EXE 旁）再重启。可用普通 PowerShell 查询截图工具路径：
 
 ```powershell
 Get-AppxPackage Microsoft.ScreenSketch | Select-Object -ExpandProperty InstallLocation
 ```
+
+缓存只在三个文件复制完整后发布；截图工具版本或源文件变化时会创建新缓存。缓存读取或复制失败时，**Engine status...** 会显示源路径、缓存路径及失败原因，并回退旧版引擎。
 
 本仓库与 CI 产物不附带微软 DLL 或模型，也不会自动联网下载它们。OneOCR 是截图工具的非公开接口，版本变化可能导致加载或调用不兼容；遇到可恢复的加载/识别错误会回退旧版引擎。成功识别为空时保留空结果，不用另一个引擎覆盖。可在 **Engine status...** 查看实际状态及原因，更新截图工具后需重启 MyOCR。
 
@@ -53,7 +55,7 @@ Add-WindowsCapability -Online -Name Language.OCR~~~zh-CN~0.0.1.0
 
 ## 删除与旧版迁移
 
-便携版退出后直接删除解压目录即可。
+便携版退出后可删除解压目录。自动复制的 OneOCR 文件位于 `%LOCALAPPDATA%\MyOCR\OneOCR\`；如需完整清理，可在退出 MyOCR 后删除该缓存目录，系统截图工具不受影响。
 
 如果之前安装过 MSIX 测试版，先从托盘退出旧版，并在 Windows 设置的“已安装的应用”中卸载 MyOCR，避免两个版本同时运行。也可以在普通用户 PowerShell 执行：
 
@@ -65,6 +67,6 @@ Get-AppxPackage Wynemo.MyOCR | Remove-AppxPackage
 
 ## 构建
 
-通过 GitHub Actions 的 **Windows → Run workflow** 编译、运行截图几何、引擎回退、像素格式、原生资源清理等单元测试和 Clippy 检查，生成便携版 ZIP。产物包含 `myocr.exe`、本说明、`THIRD_PARTY_NOTICES.md` 和 `SHA256SUMS.txt` 校验清单。Windows 编译全部在 GitHub 的 Windows runner 上完成，macOS 本地无需安装 Windows 工具链。
+通过 GitHub Actions 的 **Windows → Run workflow** 编译、运行截图几何、引擎回退、像素格式、原生资源清理、缓存完整性及 DLL 执行权限回归测试和 Clippy 检查，生成便携版 ZIP。产物包含 `myocr.exe`、本说明、`THIRD_PARTY_NOTICES.md` 和 `SHA256SUMS.txt` 校验清单。Windows 编译全部在 GitHub 的 Windows runner 上完成，macOS 本地无需安装 Windows 工具链。
 
 程序直接从普通 Win32 进程动态加载 OneOCR，并保留系统 Windows.Media.Ocr 回退，不注册应用包身份。CI 的模拟 ABI 测试覆盖文本提取及资源释放，但不代表已验证目标机器上的微软模型。真实 OneOCR 效果、框选、通知和多屏缩放仍需在目标 Windows 11 机器验收。

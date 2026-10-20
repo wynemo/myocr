@@ -1,10 +1,15 @@
 // Runtime-loaded OneOCR ABI, based on wangfu91/oneocr-rs (MIT) and
 // b1tg/win11-oneocr. See THIRD_PARTY_NOTICES.md. No Microsoft DLL/model is bundled.
 use std::{
+    collections::hash_map::DefaultHasher,
     ffi::{c_char, c_void, CStr, CString},
+    fs,
+    hash::{Hash, Hasher},
+    io,
     os::windows::ffi::OsStrExt,
     path::{Path, PathBuf},
     ptr::{null, null_mut},
+    sync::atomic::{AtomicU64, Ordering},
 };
 use windows::{core::HSTRING, Management::Deployment::PackageManager};
 use windows_sys::Win32::{
@@ -141,24 +146,38 @@ impl Engine {
             for package in manager.FindPackagesByUserSecurityId(&HSTRING::new())? {
                 if package.Id()?.Name()? == "Microsoft.ScreenSketch" {
                     let root = PathBuf::from(package.InstalledLocation()?.Path()?.to_os_string());
-                    directories.push(root.join("SnippingTool"));
-                    directories.push(root);
+                    directories.push((root.join("SnippingTool"), true));
+                    directories.push((root, true));
                 }
             }
             Ok(())
         })();
         if let Ok(exe) = std::env::current_exe() {
             if let Some(parent) = exe.parent() {
-                directories.push(parent.join("oneocr"));
-                directories.push(parent.to_path_buf());
+                directories.push((parent.join("oneocr"), false));
+                directories.push((parent.to_path_buf(), false));
             }
         }
         let mut errors = Vec::new();
-        for directory in directories {
-            if ["oneocr.dll", "oneocr.onemodel", "onnxruntime.dll"]
+        for (directory, packaged) in directories {
+            if RUNTIME_FILES
                 .iter()
                 .all(|file| directory.join(file).is_file())
             {
+                // WindowsApps files can be readable yet denied executable mapping.
+                // Copy their bytes into user-owned files, without copying package ACLs.
+                let prepared = if packaged {
+                    user_cache_root().and_then(|root| cache_runtime(&directory, &root))
+                } else {
+                    Ok(directory.clone())
+                };
+                let directory = match prepared {
+                    Ok(directory) => directory,
+                    Err(error) => {
+                        errors.push(error);
+                        continue;
+                    }
+                };
                 match unsafe { Self::load(&directory) } {
                     Ok(engine) => return Ok(engine),
                     Err(error) => errors.push(error),
@@ -330,6 +349,97 @@ fn opaque_pixels(pixels: &[u8], width: i32, height: i32) -> Result<Vec<u8>, Stri
         .collect())
 }
 
+const RUNTIME_FILES: [&str; 3] = ["oneocr.dll", "oneocr.onemodel", "onnxruntime.dll"];
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn user_cache_root() -> Result<PathBuf, String> {
+    std::env::var_os("LOCALAPPDATA")
+        .filter(|value| !value.is_empty())
+        .map(|value| PathBuf::from(value).join("MyOCR").join("OneOCR"))
+        .ok_or_else(|| "LOCALAPPDATA is unavailable. Put the three OneOCR files in the oneocr folder beside myocr.exe.".into())
+}
+
+struct TemporaryDirectory(PathBuf);
+impl Drop for TemporaryDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn cache_runtime(source: &Path, root: &Path) -> Result<PathBuf, String> {
+    let prepare = || -> io::Result<PathBuf> {
+        // This hash identifies a source version, not a security/content checksum.
+        // A package path or any component's size/mtime change selects a new cache.
+        let mut version = DefaultHasher::new();
+        source.hash(&mut version);
+        let mut metadata = Vec::new();
+        for name in RUNTIME_FILES {
+            let file = fs::metadata(source.join(name))?;
+            if !file.is_file() {
+                return Err(io::Error::other(format!("{name} is not a file")));
+            }
+            let stamp = (file.len(), file.modified()?);
+            stamp.hash(&mut version);
+            metadata.push(stamp);
+        }
+        let tag = format!("v1-{:016x}", version.finish());
+        let destination = root.join(&tag);
+        if destination.join(".complete").is_file()
+            && RUNTIME_FILES
+                .iter()
+                .zip(&metadata)
+                .all(|(name, (length, _))| {
+                    fs::metadata(destination.join(name))
+                        .is_ok_and(|file| file.is_file() && file.len() == *length)
+                })
+        {
+            return Ok(destination);
+        }
+        fs::create_dir_all(root)?;
+        let temporary = TemporaryDirectory(root.join(format!(
+            ".{tag}-{}-{}.tmp",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        )));
+        fs::create_dir(&temporary.0)?;
+        for (name, (length, modified)) in RUNTIME_FILES.iter().zip(&metadata) {
+            let path = source.join(name);
+            let mut input = fs::File::open(&path).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("Cannot read {}: {error}", path.display()),
+                )
+            })?;
+            let mut output = fs::File::create(temporary.0.join(name))?;
+            // Do not use CopyFile/ACL copying: a fresh file inherits this user's
+            // cache directory permissions, not the protected package permissions.
+            let copied = io::copy(&mut input, &mut output)?;
+            output.sync_all()?;
+            let after = fs::metadata(&path)?;
+            if copied != *length || after.len() != *length || after.modified()? != *modified {
+                return Err(io::Error::other("Snipping Tool changed while preparing OneOCR. Restart MyOCR after its update finishes."));
+            }
+        }
+        fs::write(
+            temporary.0.join(".complete"),
+            source.to_string_lossy().as_bytes(),
+        )?;
+        // Only publish a complete three-file set. An interrupted copy cannot be loaded.
+        if destination.exists() {
+            fs::remove_dir_all(&destination)?;
+        }
+        fs::rename(&temporary.0, &destination)?;
+        Ok(destination)
+    };
+    prepare().map_err(|error| {
+        format!(
+            "Cannot prepare OneOCR user cache from {} to {}: {error}",
+            source.display(),
+            root.display()
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -476,5 +586,107 @@ mod tests {
                 .contains("42"));
         }
         RELEASES.with_borrow(|r| assert_eq!(r, &["result", "pipeline", "init"]));
+    }
+
+    fn scratch_directory() -> TemporaryDirectory {
+        let path = std::env::temp_dir().join(format!(
+            "myocr-cache-test-{}-{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&path).unwrap();
+        TemporaryDirectory(path)
+    }
+
+    fn runtime_fixture(source: &Path) {
+        fs::create_dir(source).unwrap();
+        for name in RUNTIME_FILES {
+            fs::write(source.join(name), name).unwrap();
+        }
+    }
+
+    fn deny_file_permission(file: &Path, permission: &str) {
+        use std::process::Command;
+        let user = Command::new("whoami")
+            .args(["/user", "/fo", "csv", "/nh"])
+            .output()
+            .unwrap();
+        assert!(user.status.success());
+        let user = String::from_utf8(user.stdout).unwrap();
+        let sid = user.trim().rsplit(',').next().unwrap().trim_matches('"');
+        assert!(sid.starts_with("S-1-"));
+        let result = Command::new("icacls")
+            .arg(file)
+            .arg("/deny")
+            .arg(format!("*{sid}:({permission})"))
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stdout)
+        );
+    }
+
+    #[test]
+    fn cache_contains_complete_source_set_and_tracks_version_changes() {
+        let scratch = scratch_directory();
+        let source = scratch.0.join("source");
+        let root = scratch.0.join("cache");
+        runtime_fixture(&source);
+        let first = cache_runtime(&source, &root).unwrap();
+        for name in RUNTIME_FILES {
+            assert_eq!(
+                fs::read(first.join(name)).unwrap(),
+                fs::read(source.join(name)).unwrap()
+            );
+        }
+        assert!(first.join(".complete").is_file());
+        assert_eq!(cache_runtime(&source, &root).unwrap(), first);
+        fs::write(source.join("oneocr.onemodel"), "updated model content").unwrap();
+        let updated = cache_runtime(&source, &root).unwrap();
+        assert_ne!(updated, first);
+        assert_eq!(
+            fs::read_to_string(updated.join("oneocr.onemodel")).unwrap(),
+            "updated model content"
+        );
+        // Rebuild incomplete/corrupt cache entries instead of loading a partial set.
+        fs::remove_file(updated.join("oneocr.dll")).unwrap();
+        assert_eq!(cache_runtime(&source, &root).unwrap(), updated);
+        assert!(updated.join("oneocr.dll").is_file());
+    }
+
+    #[test]
+    fn cache_copy_read_failure_never_publishes_partial_runtime() {
+        let scratch = scratch_directory();
+        let source = scratch.0.join("source");
+        let root = scratch.0.join("cache");
+        runtime_fixture(&source);
+        deny_file_permission(&source.join("oneocr.onemodel"), "RD");
+        let error = cache_runtime(&source, &root).unwrap_err();
+        assert!(error.contains("Cannot read"));
+        assert!(error.contains("oneocr.onemodel"));
+        assert_eq!(fs::read_dir(root).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn protected_source_can_be_copied_and_loaded_without_inheriting_execute_deny() {
+        let scratch = scratch_directory();
+        let source = scratch.0.join("source");
+        let root = scratch.0.join("cache");
+        runtime_fixture(&source);
+        let system_dll = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32")
+            .join("version.dll");
+        fs::copy(system_dll, source.join("onnxruntime.dll")).unwrap();
+        deny_file_permission(&source.join("onnxruntime.dll"), "X");
+        let error = unsafe { Library::open(&source.join("onnxruntime.dll")) }
+            .err()
+            .unwrap();
+        assert!(error.contains("os error 5"), "{error}");
+        let cached = cache_runtime(&source, &root).unwrap();
+        let library = unsafe { Library::open(&cached.join("onnxruntime.dll")) }
+            .unwrap_or_else(|e| panic!("{e}"));
+        drop(library);
     }
 }
