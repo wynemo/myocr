@@ -139,7 +139,18 @@ pub struct Engine {
 
 impl Engine {
     pub fn discover() -> Result<Self, String> {
+        // Explicit local files take priority over accessing a protected Store package.
+        // In particular, accept files copied directly into the visible cache root.
         let mut directories = Vec::new();
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(parent) = exe.parent() {
+                directories.push((parent.join("oneocr"), false));
+                directories.push((parent.to_path_buf(), false));
+            }
+        }
+        if let Ok(root) = user_cache_root() {
+            directories.push((root, false));
+        }
         let package_lookup = (|| -> windows::core::Result<()> {
             let manager = PackageManager::new()?;
             // Empty SID means the current user; no all-user enumeration or elevation.
@@ -152,12 +163,6 @@ impl Engine {
             }
             Ok(())
         })();
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(parent) = exe.parent() {
-                directories.push((parent.join("oneocr"), false));
-                directories.push((parent.to_path_buf(), false));
-            }
-        }
         let mut errors = Vec::new();
         for (directory, packaged) in directories {
             if RUNTIME_FILES

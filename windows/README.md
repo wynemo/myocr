@@ -30,7 +30,13 @@ Rust 编写的 Windows 11 x64 托盘 OCR 工具，优先使用本机截图工具
 
 程序会枚举**当前用户**安装的 `Microsoft.ScreenSketch`，在安装目录及其 `SnippingTool` 子目录中查找 `oneocr.dll`、`onnxruntime.dll` 和 `oneocr.onemodel`。为避免 `WindowsApps` 的 DLL 加载权限限制，首次运行会将本机的三个文件复制到 `%LOCALAPPDATA%\MyOCR\OneOCR\` 下的版本缓存，再从缓存加载。复制只读取原文件内容，不继承其受限权限；无需安装证书、提权、修改系统目录权限或改变 DLL 全局搜索路径。初始化和模型保留在一个后台线程，重复框选时复用。
 
-如果自动发现失败，可先更新 Microsoft Store 的“截图工具”并重启 MyOCR。也支持将**自己机器上同一版本截图工具**的上述三个文件一起放在 `myocr.exe` 旁的 `oneocr/` 文件夹（或直接放在 EXE 旁）再重启。可用普通 PowerShell 查询截图工具路径：
+手动提供的完整三个文件优先加载，依次检查：
+
+1. `myocr.exe` 旁的 `oneocr/` 文件夹。
+2. `myocr.exe` 所在目录。
+3. `%LOCALAPPDATA%\MyOCR\OneOCR\` 根目录（可直接把三个文件复制到这里，无需建立版本子目录）。
+
+这些位置都没有可用组件时，才尝试从截图工具自动复制。每次更换组件后，都需从托盘退出并重新启动 MyOCR。三个文件应来自**自己机器上同一版本截图工具**。如果自动发现失败，可先更新 Microsoft Store 的“截图工具”。可用普通 PowerShell 查询安装路径：
 
 ```powershell
 Get-AppxPackage Microsoft.ScreenSketch | Select-Object -ExpandProperty InstallLocation
