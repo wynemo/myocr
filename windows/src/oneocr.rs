@@ -139,7 +139,7 @@ impl Engine {
             let manager = PackageManager::new()?;
             // Empty SID means the current user; no all-user enumeration or elevation.
             for package in manager.FindPackagesByUserSecurityId(&HSTRING::new())? {
-                if package.Id()?.Name()?.to_string() == "Microsoft.ScreenSketch" {
+                if package.Id()?.Name()? == "Microsoft.ScreenSketch" {
                     let root = PathBuf::from(package.InstalledLocation()?.Path()?.to_os_string());
                     directories.push(root.join("SnippingTool"));
                     directories.push(root);
@@ -323,7 +323,9 @@ fn opaque_pixels(pixels: &[u8], width: i32, height: i32) -> Result<Vec<u8>, Stri
     // Native DIB data is BGRA and has undefined (often zero) alpha.
     // OneOCR takes four-channel pixels; convert to RGBA and force opaque alpha.
     Ok(pixels
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|p| [p[2], p[1], p[0], 255])
         .collect())
 }
