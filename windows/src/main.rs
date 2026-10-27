@@ -2,6 +2,7 @@
 
 mod ocr;
 mod oneocr;
+mod screenshot_text;
 
 use std::{
     ffi::c_void,
@@ -28,6 +29,8 @@ const ENGINE_AUTO: u16 = 4;
 const ENGINE_LEGACY: u16 = 5;
 const ENGINE_DETAILS: u16 = 6;
 const OPEN_BROWSER: u16 = 7;
+const MODE_OCR: u16 = 8;
+const MODE_BASE64: u16 = 9;
 const AUTO: u16 = 100;
 const LANGUAGE: u16 = 101;
 
@@ -111,7 +114,11 @@ impl Screenshot {
         Ok(shot)
     }
 
-    unsafe fn crop(&self, rect: RECT) -> Result<(Vec<u8>, i32, i32), String> {
+    unsafe fn crop(
+        &self,
+        rect: RECT,
+        strokes: &[Vec<POINT>],
+    ) -> Result<(Vec<u8>, i32, i32), String> {
         let width = rect.right - rect.left;
         let height = rect.bottom - rect.top;
         let dc = CreateCompatibleDC(self.dc);
@@ -135,6 +142,8 @@ impl Screenshot {
         let ok = BitBlt(
             dc, 0, 0, width, height, self.dc, rect.left, rect.top, SRCCOPY,
         );
+        SetViewportOrgEx(dc, -rect.left, -rect.top, null_mut());
+        draw_strokes(dc, strokes);
         GdiFlush();
         let pixels = if ok != 0 {
             Some(
@@ -169,6 +178,9 @@ struct App {
     start: Option<POINT>,
     end: POINT,
     dragging: bool,
+    base64_mode: bool,
+    editing: Option<RECT>,
+    strokes: Vec<Vec<POINT>>,
     busy: bool,
     languages: Vec<(String, String)>,
     selected: Option<usize>,
@@ -176,7 +188,33 @@ struct App {
     engine_status: String,
     last_result: String,
     sender: mpsc::Sender<ocr::Request>,
-    receiver: mpsc::Receiver<ocr::Event>,
+    receiver: mpsc::Receiver<Event>,
+    events: mpsc::Sender<Event>,
+}
+
+enum Event {
+    Ocr(ocr::Event),
+    Screenshot(Result<String, String>),
+}
+
+// Use the same GDI rendering for preview and exported pixels.
+unsafe fn draw_strokes(dc: HDC, strokes: &[Vec<POINT>]) {
+    let pen = CreatePen(PS_SOLID, 3, 0x000000ff);
+    if pen.is_null() {
+        return;
+    }
+    let old = SelectObject(dc, pen);
+    for stroke in strokes {
+        if let Some(first) = stroke.first() {
+            MoveToEx(dc, first.x, first.y, null_mut());
+            LineTo(dc, first.x + 1, first.y);
+            for point in &stroke[1..] {
+                LineTo(dc, point.x, point.y);
+            }
+        }
+    }
+    SelectObject(dc, old);
+    DeleteObject(pen);
 }
 
 unsafe fn app_ptr(hwnd: HWND) -> *mut App {
@@ -260,6 +298,8 @@ unsafe fn cancel(pointer: *mut App) {
         state.dragging = false;
         state.screenshot = None;
         state.start = None;
+        state.editing = None;
+        state.strokes.clear();
         state.overlay
     };
     ReleaseCapture();
@@ -277,6 +317,8 @@ unsafe fn begin(hwnd: HWND) {
             state.screenshot = Some(shot);
             state.start = None;
             state.dragging = false;
+            state.editing = None;
+            state.strokes.clear();
             let overlay = state.overlay;
             SetWindowPos(overlay, HWND_TOPMOST, x, y, width, height, SWP_SHOWWINDOW);
             SetForegroundWindow(overlay);
@@ -295,11 +337,32 @@ unsafe fn menu(hwnd: HWND) {
         MF_STRING | if state.busy { MF_GRAYED } else { 0 },
         CAPTURE as usize,
         wide(if state.busy {
-            "Recognizing..."
+            "Processing..."
+        } else if state.base64_mode {
+            "Copy screenshot as Base64 (Ctrl+Alt+O)"
         } else {
             "Capture text (Ctrl+Alt+O)"
         })
         .as_ptr(),
+    );
+    let modes = CreatePopupMenu();
+    AppendMenuW(
+        modes,
+        MF_STRING | if !state.base64_mode { MF_CHECKED } else { 0 },
+        MODE_OCR as usize,
+        wide("Capture text (OCR)").as_ptr(),
+    );
+    AppendMenuW(
+        modes,
+        MF_STRING | if state.base64_mode { MF_CHECKED } else { 0 },
+        MODE_BASE64 as usize,
+        wide("Copy screenshot as Base64").as_ptr(),
+    );
+    AppendMenuW(
+        menu,
+        MF_POPUP,
+        modes as usize,
+        wide("Capture mode").as_ptr(),
     );
     let engines = CreatePopupMenu();
     AppendMenuW(
@@ -387,6 +450,8 @@ unsafe fn menu(hwnd: HWND) {
     PostMessageW(hwnd, WM_NULL, 0, 0);
     match command as u16 {
         CAPTURE => begin(hwnd),
+        MODE_OCR => (*app_ptr(hwnd)).base64_mode = false,
+        MODE_BASE64 => (*app_ptr(hwnd)).base64_mode = true,
         QUIT => {
             DestroyWindow(hwnd);
         }
@@ -410,6 +475,48 @@ unsafe fn menu(hwnd: HWND) {
     }
 }
 
+unsafe fn complete_selection(hwnd: HWND, rect: RECT) {
+    let pointer = app_ptr(hwnd);
+    let state = &mut *pointer;
+    let base64_mode = state.base64_mode;
+    let crop = state
+        .screenshot
+        .as_ref()
+        .map(|shot| shot.crop(rect, &state.strokes));
+    cancel(pointer);
+    let owner = GetWindow(hwnd, GW_OWNER);
+    if let Some(crop) = crop {
+        match crop {
+            Ok((pixels, width, height)) => {
+                let state = &mut *pointer;
+                state.busy = true;
+                if base64_mode {
+                    let events = state.events.clone();
+                    let owner_id = owner as usize;
+                    std::thread::spawn(move || {
+                        let result = screenshot_text::encode(&pixels, width, height);
+                        let _ = events.send(Event::Screenshot(result));
+                        PostMessageW(owner_id as HWND, COMPLETE, 0, 0);
+                    });
+                } else {
+                    let request = ocr::Request {
+                        pixels,
+                        width,
+                        height,
+                        language: state.selected.map(|i| state.languages[i].0.clone()),
+                        prefer_oneocr: state.prefer_oneocr,
+                    };
+                    if state.sender.send(request).is_err() {
+                        state.busy = false;
+                        notify(owner, "OCR worker stopped. Restart MyOCR.", true);
+                    }
+                }
+            }
+            Err(error) => notify(owner, &error, true),
+        }
+    }
+}
+
 unsafe extern "system" fn overlay_proc(
     hwnd: HWND,
     message: u32,
@@ -428,21 +535,44 @@ unsafe extern "system" fn overlay_proc(
             let dc = BeginPaint(hwnd, &mut paint);
             if let Some(shot) = &state.screenshot {
                 BitBlt(dc, 0, 0, shot.width, shot.height, shot.dc, 0, 0, SRCCOPY);
+                if let Some(rect) = state.editing {
+                    let saved = SaveDC(dc);
+                    IntersectClipRect(dc, rect.left, rect.top, rect.right, rect.bottom);
+                    draw_strokes(dc, &state.strokes);
+                    RestoreDC(dc, saved);
+                }
                 SetBkMode(dc, TRANSPARENT as i32);
                 SetTextColor(dc, 0x00ffffff);
-                let text = wide("Drag to select text. Esc / right-click to cancel.");
+                let text = wide(if state.editing.is_some() {
+                    "Draw to annotate. Enter: copy PNG as Base64. Ctrl+Z: undo. Esc / right-click: cancel."
+                } else if state.base64_mode {
+                    "Drag to select screenshot, then annotate and press Enter. Esc / right-click: cancel."
+                } else {
+                    "Drag to select text. Esc / right-click to cancel."
+                });
+                let banner_top = if state.editing.is_some_and(|r| r.top < 42) {
+                    if state.editing.is_some_and(|r| r.bottom > shot.height - 42) {
+                        -42 // Hide the banner when the selection occupies both edges.
+                    } else {
+                        shot.height - 42
+                    }
+                } else {
+                    0
+                };
                 let mut banner = RECT {
                     left: 0,
-                    top: 0,
+                    top: banner_top,
                     right: shot.width,
-                    bottom: 42,
+                    bottom: banner_top + 42,
                 };
                 FillRect(dc, &banner, GetStockObject(BLACK_BRUSH) as HBRUSH);
                 banner.left = 14;
-                banner.top = 10;
+                banner.top += 10;
                 DrawTextW(dc, text.as_ptr(), -1, &mut banner, DT_LEFT | DT_SINGLELINE);
                 if let Some(start) = state.start {
-                    let rect = selection(start, state.end, shot.width, shot.height);
+                    let rect = state
+                        .editing
+                        .unwrap_or_else(|| selection(start, state.end, shot.width, shot.height));
                     DrawFocusRect(dc, &rect);
                 }
             }
@@ -450,6 +580,20 @@ unsafe extern "system" fn overlay_proc(
             0
         }
         WM_LBUTTONDOWN => {
+            if let Some(rect) = state.editing {
+                let point = mouse_point(lparam);
+                if point.x >= rect.left
+                    && point.x < rect.right
+                    && point.y >= rect.top
+                    && point.y < rect.bottom
+                {
+                    state.strokes.push(vec![point]);
+                    state.dragging = true;
+                    SetCapture(hwnd);
+                    InvalidateRect(hwnd, null(), 0);
+                }
+                return 0;
+            }
             state.start = Some(mouse_point(lparam));
             state.end = mouse_point(lparam);
             state.dragging = true;
@@ -458,39 +602,52 @@ unsafe extern "system" fn overlay_proc(
         }
         WM_MOUSEMOVE if state.dragging => {
             state.end = mouse_point(lparam);
+            if state.editing.is_some() {
+                if let Some(stroke) = state.strokes.last_mut() {
+                    stroke.push(state.end);
+                }
+            }
             InvalidateRect(hwnd, null(), 0);
             0
         }
         WM_LBUTTONUP if state.dragging => {
             state.dragging = false;
             state.end = mouse_point(lparam);
-            let crop = state.screenshot.as_ref().and_then(|shot| {
-                let rect = selection(state.start?, state.end, shot.width, shot.height);
-                (rect.right - rect.left >= 3 && rect.bottom - rect.top >= 3)
-                    .then(|| shot.crop(rect))
-            });
-            cancel(pointer);
-            if let Some(crop) = crop {
-                let state = &mut *pointer;
-                let owner = GetWindow(hwnd, GW_OWNER);
-                match crop {
-                    Ok((pixels, width, height)) => {
-                        state.busy = true;
-                        let request = ocr::Request {
-                            pixels,
-                            width,
-                            height,
-                            language: state.selected.map(|i| state.languages[i].0.clone()),
-                            prefer_oneocr: state.prefer_oneocr,
-                        };
-                        if state.sender.send(request).is_err() {
-                            state.busy = false;
-                            notify(owner, "OCR worker stopped. Restart MyOCR.", true);
-                        }
-                    }
-                    Err(error) => notify(owner, &error, true),
+            if state.editing.is_some() {
+                if let Some(stroke) = state.strokes.last_mut() {
+                    stroke.push(state.end);
                 }
+                ReleaseCapture();
+                InvalidateRect(hwnd, null(), 0);
+                return 0;
             }
+            let rect = state.screenshot.as_ref().and_then(|shot| {
+                let rect = selection(state.start?, state.end, shot.width, shot.height);
+                (rect.right - rect.left >= 3 && rect.bottom - rect.top >= 3).then_some(rect)
+            });
+            match rect {
+                Some(rect) if state.base64_mode => {
+                    state.editing = Some(rect);
+                    ReleaseCapture();
+                    InvalidateRect(hwnd, null(), 0);
+                }
+                Some(rect) => complete_selection(hwnd, rect),
+                None => cancel(pointer),
+            }
+            0
+        }
+        WM_KEYDOWN if wparam == VK_RETURN as usize && state.editing.is_some() => {
+            complete_selection(hwnd, state.editing.unwrap());
+            0
+        }
+        WM_KEYDOWN
+            if wparam == b'Z' as usize
+                && GetKeyState(VK_CONTROL as i32) < 0
+                && state.editing.is_some()
+                && !state.dragging =>
+        {
+            state.strokes.pop();
+            InvalidateRect(hwnd, null(), 0);
             0
         }
         WM_KEYDOWN if wparam == VK_ESCAPE as usize => {
@@ -541,11 +698,25 @@ unsafe extern "system" fn owner_proc(
             // End the App borrow before notifications/dialogs can re-enter the UI.
             for event in events {
                 match event {
-                    ocr::Event::Ready(status) => {
+                    Event::Screenshot(result) => {
+                        (*app_ptr(hwnd)).busy = false;
+                        match result.and_then(|text| copy_text(hwnd, &text)) {
+                            Ok(()) => {
+                                MessageBeep(MB_OK);
+                                notify(
+                                    hwnd,
+                                    "Screenshot copied as PNG Base64 (76 characters per line).",
+                                    false,
+                                );
+                            }
+                            Err(error) => notify(hwnd, &error, true),
+                        }
+                    }
+                    Event::Ocr(ocr::Event::Ready(status)) => {
                         (*app_ptr(hwnd)).engine_status = status.clone();
                         notify(hwnd, &status, false);
                     }
-                    ocr::Event::Completed(result) => {
+                    Event::Ocr(ocr::Event::Completed(result)) => {
                         (*app_ptr(hwnd)).busy = false;
                         match result {
                             Ok(result) => {
@@ -639,13 +810,16 @@ unsafe fn run_app() -> Result<(), String> {
             .is_some_and(|base| base.eq_ignore_ascii_case("zh"))
     });
     let (sender, requests) = mpsc::channel::<ocr::Request>();
-    let (events, receiver) = mpsc::channel::<ocr::Event>();
+    let (events, receiver) = mpsc::channel::<Event>();
     let mut state = Box::new(App {
         overlay: null_mut(),
         screenshot: None,
         start: None,
         end: POINT { x: 0, y: 0 },
         dragging: false,
+        base64_mode: false,
+        editing: None,
+        strokes: Vec::new(),
         busy: false,
         languages,
         selected,
@@ -654,6 +828,7 @@ unsafe fn run_app() -> Result<(), String> {
         last_result: "No recognition yet".into(),
         sender,
         receiver,
+        events: events.clone(),
     });
     let instance = GetModuleHandleW(null());
     let class = wide("MyOCR.Owner");
@@ -734,19 +909,21 @@ unsafe fn run_app() -> Result<(), String> {
     std::thread::spawn(move || {
         let status = CoInitializeEx(null(), COINIT_MULTITHREADED as u32);
         if status < 0 {
-            let _ = events.send(ocr::Event::Ready(format!(
+            let _ = events.send(Event::Ocr(ocr::Event::Ready(format!(
                 "Cannot initialize OCR worker: 0x{:08X}",
                 status as u32
-            )));
+            ))));
             PostMessageW(owner_id as HWND, COMPLETE, 0, 0);
             return;
         }
         {
             let backend = ocr::Backend::new();
-            let _ = events.send(ocr::Event::Ready(backend.status()));
+            let _ = events.send(Event::Ocr(ocr::Event::Ready(backend.status())));
             PostMessageW(owner_id as HWND, COMPLETE, 0, 0);
             for request in requests {
-                let _ = events.send(ocr::Event::Completed(backend.recognize(request)));
+                let _ = events.send(Event::Ocr(ocr::Event::Completed(
+                    backend.recognize(request),
+                )));
                 if PostMessageW(owner_id as HWND, COMPLETE, 0, 0) == 0 {
                     break;
                 }
@@ -796,5 +973,51 @@ mod tests {
     fn mouse_coordinates_are_signed() {
         let p = mouse_point(((25u32 << 16) | (-10i16 as u16 as u32)) as isize);
         assert_eq!((p.x, p.y), (-10, 25));
+    }
+
+    #[test]
+    fn crop_includes_annotations_at_selection_offset_without_changing_source() {
+        unsafe {
+            let dc = CreateCompatibleDC(null_mut());
+            assert!(!dc.is_null());
+            let mut info: BITMAPINFO = zeroed();
+            info.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
+            info.bmiHeader.biWidth = 32;
+            info.bmiHeader.biHeight = -32;
+            info.bmiHeader.biPlanes = 1;
+            info.bmiHeader.biBitCount = 32;
+            let mut bits = null_mut();
+            let bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
+            assert!(!bitmap.is_null());
+            let old = SelectObject(dc, bitmap);
+            let shot = Screenshot {
+                dc,
+                bitmap,
+                old,
+                x: 0,
+                y: 0,
+                width: 32,
+                height: 32,
+            };
+            std::ptr::write_bytes(bits, 255, 32 * 32 * 4);
+            let rect = RECT {
+                left: 8,
+                top: 10,
+                right: 24,
+                bottom: 26,
+            };
+            let strokes = vec![vec![POINT { x: 10, y: 14 }, POINT { x: 22, y: 14 }]];
+            let (pixels, width, height) = shot.crop(rect, &strokes).unwrap();
+            assert_eq!((width, height), (16, 16));
+            let red = (4 * width as usize + 6) * 4;
+            assert_eq!(&pixels[red..red + 3], &[0, 0, 255]);
+            assert_eq!(&pixels[..3], &[255, 255, 255]);
+            let (original, _, _) = shot.crop(rect, &[]).unwrap();
+            assert!(original
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|p| p[..3] == [255, 255, 255]));
+        }
     }
 }

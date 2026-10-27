@@ -15,6 +15,7 @@ Rust 编写的 Windows 11 x64 托盘 OCR 工具，优先使用本机截图工具
 ## 使用
 
 - 按 **Ctrl+Alt+O**，或左键点击托盘图标；拖动鼠标框选，松开后识别并自动复制文字。
+- 右键托盘 → **Capture mode → Copy screenshot as Base64** 切换为截图文本模式；之后按 **Ctrl+Alt+O** 或点击托盘图标，框选后可按住左键用红笔标注，**Ctrl+Z** 撤销上一笔，**Enter** 确认复制。不需要标注时直接按 Enter。导出的 PNG 包含选区内的标注，不包含选框和操作提示。切回 **Capture text (OCR)** 恢复文字识别；启动时默认 OCR，模式选择仅在本次运行有效。
 - **Esc**、右键或切换到其他应用取消框选，不改变剪贴板。
 - 右键托盘 → **OCR engine** 默认选择 **Automatic (prefer OneOCR)**。OneOCR 自动识别语言，不使用旧版语言菜单。可切换 **Windows OCR (legacy)** 比较两套引擎。
 - **Engine status...** 显示 OneOCR 是否加载成功、加载目录、最近一次实际使用的引擎及回退原因；复制通知也会标出引擎。
@@ -25,6 +26,18 @@ Rust 编写的 Windows 11 x64 托盘 OCR 工具，优先使用本机截图工具
 - OneOCR 使用截图工具自带模型。仅当使用 Windows OCR 回退引擎时，才需要系统对应的 OCR 语言包；没有旧版语言包也可以启动程序并尝试 OneOCR。
 - 使用 Windows OCR 回退引擎时，选区受 `OcrEngine.MaxImageDimension` 限制；OneOCR 单次最多提取 1000 行。
 - 快捷键被其他程序占用时会提示并退出。暂不提供自定义快捷键、开机自启、ARM64 原生包或复杂表格重建。
+
+### 通过文本剪贴板传输截图
+
+**Copy screenshot as Base64** 将选区及标注编码为 PNG，再将标准 Base64 纯文本放进剪贴板，不带 `data:` 前缀。每行最多 **76 个字符**，使用 LF 换行且末尾带换行，适用于 VMware Horizon VDI 等只允许文本剪贴板的远程桌面，避免终端单行输入在 4095 字符处被截断。编码在后台完成，不依赖 OCR 引擎或语言包。
+
+在远程 Linux 终端先执行：
+
+```sh
+base64 --decode > screenshot.png <<'MYOCR_BASE64_END'
+```
+
+再粘贴剪贴板中的 Base64 文本，最后单独输入 `MYOCR_BASE64_END` 并回车，即可还原 `screenshot.png`。剪贴板只包含图片的 Base64 文本，需要先启动上面的接收命令再粘贴。
 
 ## OneOCR 加载与诊断
 
